@@ -6,8 +6,8 @@
  
 ## 为什么一个 PAT 就够
  
-Supabase 的 Personal Access Token 是**账号级别**的,不是组织级别的。只要你的账号(sue1231511)
-同时是 `sue1231511's` 和 `橘瓣插件` 这两个组织的成员,一个 PAT 就能操作两边所有项目,不需要
+Supabase 的 Personal Access Token 是**账号级别**的,不是组织级别的。只要你的账号xxx
+同时是 `xxx` 和 `xxx` 这两个组织的成员,一个 PAT 就能操作两边所有项目,不需要
 给每个组织单独生成 token。
  
 ## 包含的 29 个工具
@@ -32,7 +32,7 @@ Edge Functions:`list_edge_functions` `get_edge_function` `deploy_edge_function`
   没有开放,调用会直接报错。费用请去 Supabase Dashboard 的 Billing 页面看。
 ## 部署到 Zeabur
  
-1. 把这个文件夹推到你的 GitHub 仓库(比如 `sue1231511/supabase-multi-org-mcp`)
+1. 把这个文件夹推到你的 GitHub 仓库(比如 `sue1231513/supabase`)
 2. Zeabur 新建一个 Service,选择从这个 GitHub 仓库部署,构建方式选 Node.js(Zeabur 会自动识别
    `package.json`,跑 `npm install` + `npm start`)
 3. 在 Zeabur 这个 service 的 **环境变量** 里加两个:
