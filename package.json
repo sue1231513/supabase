@@ -1,0 +1,19 @@
+{
+  "name": "supabase-multi-org-mcp",
+  "version": "1.0.0",
+  "description": "自建 MCP 服务器：用一个 Supabase Personal Access Token 同时管理多个组织下的项目，绕开 claude.ai 官方 Supabase 连接器一次只能授权一个组织的限制。",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "express": "^4.21.2",
+    "zod": "^4.1.13",
+    "dotenv": "^16.4.7"
+  }
+}
