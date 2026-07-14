@@ -40,7 +40,13 @@ app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'supabase-multi-org-mcp' });
+  res.json({
+    status: 'ok',
+    service: 'supabase-multi-org-mcp',
+    oauth_store_configured: Boolean(
+      process.env.OAUTH_STORE_SUPABASE_URL && process.env.OAUTH_STORE_SUPABASE_SERVICE_ROLE_KEY
+    ),
+  });
 });
 
 app.get('/.well-known/oauth-authorization-server', (req, res) => {
@@ -65,10 +71,10 @@ app.get('/.well-known/oauth-protected-resource', (req, res) => {
   });
 });
 
-app.post('/register', (req, res) => {
+app.post('/register', async (req, res) => {
   try {
     const { client_name, redirect_uris } = req.body || {};
-    const client = registerClient({ client_name, redirect_uris });
+    const client = await registerClient({ client_name, redirect_uris });
     res.status(201).json({
       client_id: client.client_id,
       client_name: client.client_name,
@@ -83,13 +89,21 @@ app.post('/register', (req, res) => {
   }
 });
 
-app.get('/authorize', (req, res) => {
+app.get('/authorize', async (req, res) => {
   const { response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state, scope } = req.query;
 
   if (response_type !== 'code') {
     return res.status(400).send('只支持 response_type=code');
   }
-  const client = getClient(client_id);
+
+  let client;
+  try {
+    client = await getClient(client_id);
+  } catch (error) {
+    logError('server.get./authorize', '查询 client 失败', error, { client_id });
+    return res.status(500).send('服务器内部错误：OAuth 存储暂时不可用，请稍后重试');
+  }
+
   if (!client) {
     return res.status(400).send('未知的 client_id,请先完成动态客户端注册');
   }
@@ -107,7 +121,7 @@ app.get('/authorize', (req, res) => {
   );
 });
 
-app.post('/authorize', (req, res) => {
+app.post('/authorize', async (req, res) => {
   const { response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state, scope, key } =
     req.body || {};
 
@@ -134,13 +148,13 @@ app.post('/authorize', (req, res) => {
     );
   }
 
-  const client = getClient(client_id);
-  if (!client || !client.redirect_uris.includes(redirect_uri)) {
-    return res.status(400).send('client_id 或 redirect_uri 无效');
-  }
-
   try {
-    const code = createAuthCode({ client_id, redirect_uri, code_challenge, code_challenge_method, scope });
+    const client = await getClient(client_id);
+    if (!client || !client.redirect_uris.includes(redirect_uri)) {
+      return res.status(400).send('client_id 或 redirect_uri 无效');
+    }
+
+    const code = await createAuthCode({ client_id, redirect_uri, code_challenge, code_challenge_method, scope });
     const redirectUrl = new URL(redirect_uri);
     redirectUrl.searchParams.set('code', code);
     if (state) redirectUrl.searchParams.set('state', state);
@@ -152,12 +166,12 @@ app.post('/authorize', (req, res) => {
   }
 });
 
-app.post('/token', (req, res) => {
+app.post('/token', async (req, res) => {
   const { grant_type } = req.body || {};
   try {
     if (grant_type === 'authorization_code') {
       const { code, redirect_uri, client_id, code_verifier } = req.body;
-      const record = consumeAuthCode(code);
+      const record = await consumeAuthCode(code);
       if (!record) {
         return res.status(400).json({ error: 'invalid_grant', error_description: '授权码无效或已过期' });
       }
@@ -165,14 +179,14 @@ app.post('/token', (req, res) => {
         return res.status(400).json({ error: 'invalid_grant', error_description: 'client_id 或 redirect_uri 不匹配' });
       }
       verifyPkceOrThrow(code_verifier, record.code_challenge, record.code_challenge_method);
-      const tokens = issueTokens();
+      const tokens = await issueTokens();
       logInfo('server.post./token', '颁发新令牌', { client_id, grant_type });
       return res.json(tokens);
     }
 
     if (grant_type === 'refresh_token') {
       const { refresh_token } = req.body;
-      const tokens = rotateRefreshToken(refresh_token);
+      const tokens = await rotateRefreshToken(refresh_token);
       if (!tokens) {
         return res.status(400).json({ error: 'invalid_grant', error_description: 'refresh_token 无效或已过期' });
       }
@@ -189,7 +203,7 @@ app.post('/token', (req, res) => {
   }
 });
 
-function checkAuth(req, res) {
+async function checkAuth(req, res) {
   if (!PROXY_SECRET) {
     logWarn('server.checkAuth', 'MCP_PROXY_SECRET 未配置,当前处于无鉴权状态,任何人拿到 URL 都能操作你的 Supabase');
     return true;
@@ -198,19 +212,33 @@ function checkAuth(req, res) {
   const authHeader = req.headers.authorization || '';
   const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
 
-  // 方式一:claude.ai 走完整 OAuth 流程拿到的动态令牌
-  if (bearerToken && isAccessTokenValid(bearerToken)) {
-    return true;
+  if (!bearerToken) {
+    logWarn('server.checkAuth', '鉴权失败,拒绝请求', { hasBearer: false });
+    res.status(401).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32001,
+        message:
+          '鉴权失败:请在请求头里带 Authorization: Bearer <你的密钥>,或者通过 claude.ai 的 OAuth 授权流程获取令牌。URL 本身不再接受密钥参数。',
+      },
+      id: null,
+    });
+    return false;
   }
 
-  // 方式二:不支持 OAuth、但支持自定义请求头的客户端(比如 RikkaHub 之类),
+  // 方式一:不支持 OAuth、但支持自定义请求头的客户端(比如 RikkaHub 之类),
   // 直接把 MCP_PROXY_SECRET 原文放进 Authorization: Bearer 头里,不用走 OAuth 握手,
-  // 也不用把密钥暴露在 URL 里。
-  if (bearerToken && bearerToken === PROXY_SECRET) {
+  // 也不用把密钥暴露在 URL 里。纯字符串比较，放在数据库查询前面判断可以省一次网络往返。
+  if (bearerToken === PROXY_SECRET) {
     return true;
   }
 
-  logWarn('server.checkAuth', '鉴权失败,拒绝请求', { hasBearer: Boolean(bearerToken) });
+  // 方式二:claude.ai 走完整 OAuth 流程拿到的动态令牌，需要查 Supabase。
+  if (await isAccessTokenValid(bearerToken)) {
+    return true;
+  }
+
+  logWarn('server.checkAuth', '鉴权失败,拒绝请求', { hasBearer: true });
   res.status(401).json({
     jsonrpc: '2.0',
     error: {
@@ -224,7 +252,7 @@ function checkAuth(req, res) {
 }
 
 app.post('/mcp', async (req, res) => {
-  if (!checkAuth(req, res)) return;
+  if (!(await checkAuth(req, res))) return;
 
   let server;
   let transport;
@@ -282,6 +310,12 @@ app.listen(PORT, () => {
     logWarn(
       'server.listen',
       'PUBLIC_BASE_URL 没配置,OAuth 元数据会尝试从请求头拼 URL,不完全可靠,建议显式配置成 Zeabur 分配的域名,例如 https://xxx.zeabur.app'
+    );
+  }
+  if (!process.env.OAUTH_STORE_SUPABASE_URL || !process.env.OAUTH_STORE_SUPABASE_SERVICE_ROLE_KEY) {
+    logWarn(
+      'server.listen',
+      'OAUTH_STORE_SUPABASE_URL / OAUTH_STORE_SUPABASE_SERVICE_ROLE_KEY 没配置,OAuth 动态授权功能不可用(MCP_PROXY_SECRET 固定密钥模式仍可用)'
     );
   }
 });
